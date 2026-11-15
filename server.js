@@ -1,34 +1,37 @@
-
 const express = require("express");
 const cors = require("cors");
 const cron = require("node-cron");
 const fs = require("fs");
 const path = require("path");
-const twilio = require("twilio");
+const nodemailer = require("nodemailer");
 
 const app = express();
 app.use(cors()); // Permite conexiones desde https://amor-medicina.netlify.app
 app.use(express.json()); // Lee los datos JSON enviados por tu página
 
 // =========================================================================
-// 1. VARIABLES DE CONFIGURACIÓN DEL SERVIDOR (WHATSAPP)
+// 1. VARIABLES DE CONFIGURACIÓN DEL SERVIDOR (CORREO ELECTRÓNICO)
 // =========================================================================
-const PUERTO        = process.env.PORT || 3000;
-const ZONA_HORARIA  = "America/Mexico_City";
-const TWILIO_SID    = process.env.TWILIO_SID || "";
-const TWILIO_TOKEN  = process.env.TWILIO_TOKEN || "";
-// Número oficial del Sandbox de WhatsApp en Twilio
-const NUMERO_ORIGEN = process.env.NUMERO_ORIGEN || "whatsapp:+14155238886";
+const PUERTO       = process.env.PORT || 3000;
+const ZONA_HORARIA = "America/Mexico_City";
+const EMAIL_USER   = process.env.EMAIL_USER || ""; // Tu correo Gmail remitente
+const EMAIL_PASS   = process.env.EMAIL_PASS || ""; // Contraseña de aplicación de 16 letras
 
 const ARCHIVO_DB = path.join(__dirname, "alarmas.json");
 
-// Inicializa Twilio solo si ya existen credenciales válidas (SID empieza con "AC")
-const clienteWA = (TWILIO_SID.startsWith("AC") && TWILIO_TOKEN)
-  ? twilio(TWILIO_SID, TWILIO_TOKEN)
+// Inicializa el transportador de correo solo si existen credenciales configuradas
+const transportador = (EMAIL_USER && EMAIL_PASS)
+  ? nodemailer.createTransport({
+      service: "gmail",
+      auth: {
+        user: EMAIL_USER,
+        pass: EMAIL_PASS
+      }
+    })
   : null;
 
 // =========================================================================
-// 2. FUNCIONES DE ALMACENAMIENTO Y FORMATO DE WHATSAPP
+// 2. FUNCIONES DE ALMACENAMIENTO Y VALIDACIÓN DE CORREO
 // =========================================================================
 function leerAlarmas() {
   try {
@@ -45,15 +48,9 @@ function guardarAlarmas(lista) {
   fs.writeFileSync(ARCHIVO_DB, JSON.stringify(lista, null, 2), "utf8");
 }
 
-// Convierte 10 dígitos (ej. 5512345678) en formato oficial "whatsapp:+525512345678"
-function formatearWhatsApp(tel) {
-  const limpio = String(tel || "").replace(/[\s\-\(\)]/g, "").replace(/^whatsapp:/i, "");
-  if (!limpio) return "";
-  let conPais = limpio;
-  if (!limpio.startsWith("+")) {
-    conPais = limpio.length === 10 ? "+52" + limpio : "+" + limpio;
-  }
-  return "whatsapp:" + conPais;
+function limpiarCorreo(correo) {
+  const limpio = String(correo || "").trim().toLowerCase();
+  return limpio.includes("@") ? limpio : "";
 }
 
 function fechaLocalStr() {
@@ -66,7 +63,7 @@ function fechaLocalStr() {
 // =========================================================================
 
 app.get("/", (req, res) => {
-  res.send("💖 Servidor Amor Medicina (WhatsApp) activo. Estado API: " + (clienteWA ? "Conectado" : "Esperando llaves"));
+  res.send("💖 Servidor Amor Medicina (Correo) activo. Estado SMTP: " + (transportador ? "Conectado" : "Esperando credenciales"));
 });
 
 app.get("/api/alarmas", (req, res) => {
@@ -75,12 +72,12 @@ app.get("/api/alarmas", (req, res) => {
 
 // Guarda o actualiza una alarma individual
 app.post("/api/alarmas", (req, res) => {
-  const { id, n, h, o, ok, telefono } = req.body;
+  const { id, n, h, o, ok, correo } = req.body;
   if (!id || !n || !h) {
     return res.status(400).json({ error: "Faltan datos obligatorios (id, nombre u hora)." });
   }
 
-  const telWA = formatearWhatsApp(telefono);
+  const correoDestino = limpiarCorreo(correo);
   let alarmas = leerAlarmas();
   alarmas = alarmas.filter((item) => item.id !== id);
   alarmas.push({
@@ -88,32 +85,32 @@ app.post("/api/alarmas", (req, res) => {
     n: n,
     h: h,
     o: o || "Con mucho amor",
-    telefono: telWA,
+    correo: correoDestino,
     ok: Boolean(ok),
     fechaUltimaToma: ok ? fechaLocalStr() : ""
   });
 
   guardarAlarmas(alarmas);
-  console.log(`[ALARMA GUARDADA] ${n} (${h}) -> Destino: ${telWA || "Sin número (apagada)"}`);
-  res.json({ mensaje: "Alarma sincronizada", telefono: telWA });
+  console.log(`[ALARMA GUARDADA] ${n} (${h}) -> Destino: ${correoDestino || "Sin correo (apagada)"}`);
+  res.json({ mensaje: "Alarma sincronizada", correo: correoDestino });
 });
 
-// Actualiza o elimina el número de WhatsApp en TODAS las alarmas guardadas
-app.put("/api/telefono", (req, res) => {
-  const { telefono } = req.body;
-  const telWA = formatearWhatsApp(telefono);
+// Actualiza o elimina el correo electrónico en TODAS las alarmas guardadas
+app.put("/api/correo", (req, res) => {
+  const { correo } = req.body;
+  const correoDestino = limpiarCorreo(correo);
   let alarmas = leerAlarmas();
 
   for (let i = 0; i < alarmas.length; i++) {
-    alarmas[i].telefono = telWA;
+    alarmas[i].correo = correoDestino;
   }
 
   guardarAlarmas(alarmas);
-  console.log(`[TELÉFONO ACTUALIZADO] Nuevo destino: ${telWA || "VACÍO (Notificaciones desactivadas)"}`);
-  res.json({ mensaje: "Teléfono actualizado en el servidor", telefono: telWA });
+  console.log(`[CORREO ACTUALIZADO] Nuevo destino: ${correoDestino || "VACÍO (Avisos desactivados)"}`);
+  res.json({ mensaje: "Correo actualizado en el servidor", correo: correoDestino });
 });
 
-// Marca una medicina como tomada hoy (pausa el WhatsApp por hoy)
+// Marca una medicina como tomada hoy (pausa el envío de correo por hoy)
 app.patch("/api/alarmas/:id", (req, res) => {
   const id = Number(req.params.id);
   const { ok } = req.body;
@@ -143,7 +140,7 @@ app.delete("/api/alarmas/:id", (req, res) => {
 });
 
 // =========================================================================
-// 4. RELOJ CADA MINUTO (Reinicio 12:00 AM y envío de WhatsApp)
+// 4. RELOJ CADA MINUTO (Reinicio 12:00 AM y envío de Correo Electrónico)
 // =========================================================================
 cron.schedule("* * * * *", async () => {
   const ahora = new Date(new Date().toLocaleString("en-US", { timeZone: ZONA_HORARIA }));
@@ -163,18 +160,30 @@ cron.schedule("* * * * *", async () => {
       huboCambios = true;
     }
 
-    // 2. Envío de WhatsApp si el cliente API está listo, está pendiente, coincide la hora y hay número
-    if (clienteWA && !alarmas[i].ok && alarmas[i].h === horaActual && alarmas[i].telefono) {
-      const mensaje = `💖 *Amor Medicina*\n\n⏰ ¡Hola mi vida! Ya es hora de tu *${alarmas[i].n}*.\n📝 _${alarmas[i].o}_\n\nRecuerda que tu bb necesita ser fuerte y grande. ¡Te amo muchísimo! 🥰`;
+    // 2. Envío de correo si el transportador está activo, está pendiente, coincide la hora y hay correo
+    if (transportador && !alarmas[i].ok && alarmas[i].h === horaActual && alarmas[i].correo) {
+      const htmlCorreo = `
+        <div style="font-family: Arial, sans-serif; background:#FFF5F7; padding:24px; border-radius:16px; max-width:460px; margin:auto; border:2px solid #FFE3EC;">
+          <h2 style="color:#FF5C8A; margin-top:0;">💖 ¡Hora de tu medicina, mi vida!</h2>
+          <p style="font-size:16px; color:#4A3540;">Ya son las <b>${alarmas[i].h}</b> y es momento de tomar:</p>
+          <div style="background:#FFFFFF; padding:14px; border-radius:12px; border-left:5px solid #FF5C8A; margin:14px 0;">
+            <strong style="font-size:18px; color:#4A3540;">💊 ${alarmas[i].n}</strong><br>
+            <span style="color:#8C6D7C; font-size:14px;">${alarmas[i].o}</span>
+          </div>
+          <p style="font-size:14px; color:#4A3540;">Recuerda que tu bb necesita ser fuerte y grande. ¡Te amo muchísimo! 🥰</p>
+        </div>
+      `;
+
       try {
-        await clienteWA.messages.create({
-          body: mensaje,
-          from: NUMERO_ORIGEN,
-          to: alarmas[i].telefono
+        await transportador.sendMail({
+          from: `"Amor Medicina 💖" <${EMAIL_USER}>`,
+          to: alarmas[i].correo,
+          subject: `⏰💖 Hora de tu medicina: ${alarmas[i].n}`,
+          html: htmlCorreo
         });
-        console.log(`[WHATSAPP ENVIADO] ${horaActual} -> ${alarmas[i].telefono}`);
+        console.log(`[CORREO ENVIADO] ${horaActual} -> ${alarmas[i].correo}`);
       } catch (err) {
-        console.error(`[ERROR WHATSAPP] ${err.message}`);
+        console.error(`[ERROR CORREO] ${err.message}`);
       }
     }
   }
@@ -187,5 +196,5 @@ cron.schedule("* * * * *", async () => {
 });
 
 app.listen(PUERTO, () => {
-  console.log(`🚀 Servidor Amor Medicina (WhatsApp) activo en puerto ${PUERTO}`);
+  console.log(`🚀 Servidor Amor Medicina (Correo) activo en puerto ${PUERTO}`);
 });
